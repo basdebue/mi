@@ -1,0 +1,147 @@
+#!/bin/sh
+#
+# mi - a running calculator
+
+# Constants.
+readonly MARATHON_FACTOR=42.195
+readonly MILE_FACTOR=1.609344
+
+# Format distance, rounding it to 2 decimal places.
+format_distance() {
+    printf 'scale=2; (%s + 0.005) / 1\n' "$1" | bc
+}
+
+# Format time, rounding it to the nearest second.
+format_time() {
+    input=$(printf '(%s + 0.5) / 1\n' "$1" | bc)
+    hours=$(printf '%s / 3600\n' "$input" | bc)
+    mins=$(printf '(%s %% 3600) / 60\n' "$input" | bc)
+    secs=$(printf '%s %% 60\n' "$input" | bc)
+    if [ "$hours" -ge 1 ]; then
+        printf '%d:%02d:%02d' "$hours" "$mins" "$secs"
+    else
+        printf '%d:%02d' "$mins" "$secs"
+    fi
+}
+
+# Print a helpful message if an unsupported format is provided.
+unsupported_format() {
+    printf "Invalid %s format.\nFor supported formats, see 'man mi'.\n" "$1" \
+        >&2
+    exit 1
+}
+
+# Parse input arguments. The general strategy involves checking whether the
+# input satisfies a given regex. When a match is found, the input is converted
+# to a number in standard units that will be used in further computations.
+while getopts d:hp:t: opt; do
+    case "$opt" in
+        d)  # Parse distance.
+            km='^([0-9]+(.[0-9]+)?) ?(km|kilometers?)$'
+            mi='^([0-9]+(.[0-9]+)?) ?mi(les?)?$'
+            marathon='^([0-9]+(.[0-9]+)?) ?marathons?$'
+
+            if printf '%s' "$OPTARG" | grep -Eq "$km"; then
+                distance=$(printf '%s' "$OPTARG" |
+                    sed -E "s/$km/\1/")
+            elif printf '%s' "$OPTARG" | grep -Eq "$mi"; then
+                distance=$(printf '%s\n' "$OPTARG" |
+                    sed -E "s/$mi/\1 * $MILE_FACTOR/" |
+                    bc -l)
+            elif printf '%s' "$OPTARG" | grep -Eq "$marathon"; then
+                distance=$(printf '%s\n' "$OPTARG" |
+                    sed -E "s/$marathon/\1 * $MARATHON_FACTOR/" |
+                    bc -l)
+            else
+                unsupported_format 'distance'
+            fi;;
+
+        h)  # Show the manual.
+            man 1 mi
+            exit;;
+
+        p)  # Parse pace.
+            mmsspkm='^([0-5]?[0-9]):([0-5][0-9]) ?\/ ?(km|kilometer)$'
+            mmsspmi='^([0-5]?[0-9]):([0-5][0-9]) ?\/ ?mi(le)?$'
+            kmph='^([0-9]+(.[0-9]+)?) ?km\/h$'
+            mph='^([0-9]+(.[0-9]+)?) ?mph$'
+
+            if printf '%s' "$OPTARG" | grep -Eq "$mmsspkm"; then
+                pace=$(printf '%s\n' "$OPTARG" |
+                    sed -E "s/$mmsspkm/60 * \1 + \2/" |
+                    bc)
+            elif printf '%s' "$OPTARG" | grep -Eq "$mmsspmi"; then
+                pace=$(printf '%s\n' "$OPTARG" |
+                    sed -E "s/$mmsspmi/(60 * \1 + \2) \/ $MILE_FACTOR/" |
+                    bc -l)
+            elif printf '%s' "$OPTARG" | grep -Eq "$kmph"; then
+                pace=$(printf '%s\n' "$OPTARG" |
+                    sed -E "s/$kmph/3600 \/ \1/" |
+                    bc)
+            elif printf '%s' "$OPTARG" | grep -Eq "$mph"; then
+                pace=$(printf '%s\n' "$OPTARG" |
+                    sed -E "s/$mph/3600 \/ ($MILE_FACTOR * \1)/" |
+                    bc -l)
+            else
+                unsupported_format 'pace'
+            fi;;
+
+        t)  # Parse time.
+            mmss='^([0-5]?[0-9]):([0-5][0-9])$'
+            hhmmss='^([0-9]+):([0-5][0-9]):([0-5][0-9])$'
+
+            if printf '%s' "$OPTARG" | grep -Eq "$mmss"; then
+                time=$(printf '%s\n' "$OPTARG" |
+                    sed -E "s/$mmss/60 * \1 + \2/" |
+                    bc)
+            elif printf '%s' "$OPTARG" | grep -Eq "$hhmmss"; then
+                time=$(printf '%s\n' "$OPTARG" |
+                    sed -E "s/$hhmmss/3600 * \1 + 60 * \2 + \3/" |
+                    bc)
+            else
+                unsupported_format 'time'
+            fi;;
+
+        ?)  # Invalid option.
+            printf "Try 'man mi' for more information.\n" >&2
+            exit 2;;
+    esac
+done
+
+# At this point, distance is expressed in kilometers and time in seconds.
+# Now figure out the third variable.
+if [ -n "$distance" ] && [ -n "$pace" ] && [ -z "$time" ]; then
+    time=$(printf '%s * %s\n' "$distance" "$pace" | bc)
+elif [ -n "$distance" ] && [ -z "$pace" ] && [ -n "$time" ]; then
+    pace=$(printf '%s / %s\n' "$time" "$distance" | bc)
+elif [ -z "$distance" ] && [ -n "$pace" ] && [ -n "$time" ]; then
+    distance=$(printf '%s / %s\n' "$time" "$pace" | bc)
+else
+    printf "Invalid amount of input arguments; expected exactly two.\n" >&2
+    exit 1
+fi
+
+# Convert the data into a displayable format.
+if [ -z "$MI_UNITS" ] && [ "$(locale measurement)" -eq 1 ] ||
+    [ "$MI_UNITS" = 'SI' ]; then
+        speed=$(printf 'scale=1; 3600 / %s\n' "$pace" | bc)km/h
+        distance=$(format_distance "$distance")km
+        time=$(format_time "$time")
+        pace=$(format_time "$pace")/km
+elif [ -z "$MI_UNITS" ] && [ "$(locale measurement)" -eq 2 ] ||
+    [ "$MI_UNITS" = 'IMPERIAL' ]; then
+        speed=$(printf 'scale=1; 3600 / (%s * %s)\n' "$pace" "$MILE_FACTOR" |
+            bc)mph
+        distance=$(printf '%s / %s\n' "$distance" "$MILE_FACTOR" | bc -l)
+        distance=$(format_distance "$distance")mi
+        pace=$(printf '%s * %s\n' "$pace" "$MILE_FACTOR" | bc)
+        pace=$(format_time "$pace")/mi
+        time=$(format_time "$time")
+else
+    printf "Unrecognized unit format.
+Set the 'MI_UNITS' environment variable to 'SI' or 'IMPERIAL'.\n" >&2
+    exit 1
+fi
+
+printf 'distance %s\n    time %s\n    pace %s\n   speed %s\n' \
+    "$distance" "$time" "$pace" "$speed"
